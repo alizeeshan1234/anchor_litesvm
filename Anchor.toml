@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.devnet]
-litesvm_exp = "4HADsmeSsErmhVZdvYbLTmF5iBuqo1fXXwSHL2apXn1x"
+litesvm_exp = "2vsYWAyAJb85kLDeufufpTCojtVLWCaUCUCUfiq1mgpG"
 
 [registry]
 url = "https://api.apr.dev"

@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::{Mint, Token, TokenAccount};
 use anchor_spl::associated_token::AssociatedToken;
 
-declare_id!("4HADsmeSsErmhVZdvYbLTmF5iBuqo1fXXwSHL2apXn1x");
+declare_id!("2vsYWAyAJb85kLDeufufpTCojtVLWCaUCUCUfiq1mgpG");
 
 #[program]
 pub mod litesvm_exp {
@@ -36,6 +36,19 @@ pub mod litesvm_exp {
 
     pub fn init_token_account(ctx: Context<InitTokenAccount>) -> Result<()> {
         msg!("Token account initialized for: {:?}", ctx.accounts.signer.key());
+        Ok(())
+    }
+
+    pub fn transfer_tokens(ctx: Context<TransferTokens>, amount: u64) -> Result<()> {
+        let cpi_accounts = anchor_spl::token::Transfer {
+            from: ctx.accounts.from_token_account.to_account_info(),
+            to: ctx.accounts.to_token_account.to_account_info(),
+            authority: ctx.accounts.from.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        anchor_spl::token::transfer(cpi_ctx, amount)?;
+        msg!("Transferred {} tokens", amount);
         Ok(())
     }
 }
@@ -95,6 +108,35 @@ pub struct InitTokenAccount<'info> {
     pub associated_token_program: Program<'info, AssociatedToken>,
 }
 
+#[derive(Accounts)]
+pub struct TransferTokens<'info> {
+    #[account(mut)]
+    pub from: Signer<'info>,
+
+    pub to: UncheckedAccount<'info>,
+
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = from,
+    )]
+    pub from_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        init_if_needed,
+        payer = from,
+        associated_token::mint = mint,
+        associated_token::authority = to,
+    )]
+    pub to_token_account: Account<'info, TokenAccount>,
+
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+}
+
 #[account]
 pub struct CounterAccount {
     pub count: u64
@@ -113,9 +155,11 @@ mod testing {
     use anchor_lang::{InstructionData, AccountDeserialize}; 
 
     use litesvm_token::{
-        spl_token::{self, native_mint::DECIMALS},
+        spl_token::{self, native_mint::DECIMALS, state::GenericTokenAccount},
         CreateAssociatedTokenAccount, CreateMint, MintTo,
     };
+
+    use spl_token::solana_program::program_pack::Pack;
 
     #[test]
     fn initialize_counter() {
@@ -369,5 +413,80 @@ mod testing {
 
         let token_account = svm.get_account(&signer_ata).unwrap();
         println!("Token Account: {}", signer_ata);
+    }
+
+    #[test]
+    fn transfer_tokens() {
+        let mut svm = LiteSVM::new();
+        let program_id = crate::ID;
+        let program_bytes = include_bytes!("../../../target/deploy/litesvm_exp.so");
+        svm.add_program(program_id, program_bytes);
+        println!("Program ID: {}", program_id);
+
+        let sender = Keypair::new();
+        svm.airdrop(&sender.pubkey(), 10_000_000_000).unwrap(); 
+
+        let receiver = Keypair::new();
+        svm.airdrop(&receiver.pubkey(), 10_000_000_000).unwrap(); 
+
+        let mint = CreateMint::new(&mut svm, &sender)
+            .authority(&sender.pubkey())
+            .decimals(DECIMALS)
+            .send()
+            .unwrap();
+
+        let sender_ata = CreateAssociatedTokenAccount::new(&mut svm, &sender, &mint)
+            .owner(&sender.pubkey())
+            .send()
+            .unwrap();
+
+        let receiver_ata = CreateAssociatedTokenAccount::new(&mut svm, &receiver, &mint)
+            .owner(&receiver.pubkey())
+            .send()
+            .unwrap();
+
+        MintTo::new(&mut svm, &sender, &mint, &sender_ata, 1_000_000_000) 
+            .send()
+            .unwrap();
+
+        let instruction_data = crate::instruction::TransferTokens { amount: 500_000_000 }.data();
+
+        let transfer_tokens_instruction = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(sender.pubkey(), true), 
+                AccountMeta::new(receiver.pubkey(), false), 
+                AccountMeta::new(mint, false),
+                AccountMeta::new(sender_ata, false),  
+                AccountMeta::new(receiver_ata, false),  
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                AccountMeta::new_readonly(spl_token::id(), false),
+                AccountMeta::new_readonly(spl_associated_token_account::id(), false),
+            ],
+            data: instruction_data,
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[transfer_tokens_instruction],
+            Some(&sender.pubkey()),
+            &[&sender],
+            svm.latest_blockhash(),
+        );
+
+        svm.send_transaction(tx).unwrap();
+
+        println!("Tokens transferred successfully!");
+    
+        let sender_account_data = svm.get_account(&sender_ata).unwrap();
+        let receiver_account_data = svm.get_account(&receiver_ata).unwrap();
+
+        let sender_token_account = spl_token::state::Account::unpack(&sender_account_data.data).unwrap();
+        let receiver_token_account = spl_token::state::Account::unpack(&receiver_account_data.data).unwrap();
+
+        println!("Sender balance: {}", sender_token_account.amount);
+        println!("Receiver balance: {}", receiver_token_account.amount);
+
+        assert_eq!(sender_token_account.amount, 500_000_000); 
+        assert_eq!(receiver_token_account.amount, 500_000_000); 
     }
 }
