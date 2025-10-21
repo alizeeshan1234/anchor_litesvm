@@ -1,4 +1,6 @@
 use anchor_lang::prelude::*;
+use anchor_spl::token::{Mint, Token, TokenAccount};
+use anchor_spl::associated_token::AssociatedToken;
 
 declare_id!("4HADsmeSsErmhVZdvYbLTmF5iBuqo1fXXwSHL2apXn1x");
 
@@ -29,6 +31,11 @@ pub mod litesvm_exp {
         let counter = &mut ctx.accounts.counter;
         counter.count -= 1;
         msg!("Counter decremented to: {}", counter.count);
+        Ok(())
+    }
+
+    pub fn init_token_account(ctx: Context<InitTokenAccount>) -> Result<()> {
+        msg!("Token account initialized for: {:?}", ctx.accounts.signer.key());
         Ok(())
     }
 }
@@ -66,6 +73,28 @@ pub struct CounterOperation<'info> {
     pub counter: Account<'info, CounterAccount>,
 }
 
+#[derive(Accounts)]
+pub struct InitTokenAccount<'info> {
+    #[account(mut)]
+    pub signer: Signer<'info>,
+
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        init_if_needed,
+        payer = signer,
+        associated_token::mint = mint,
+        associated_token::authority = signer,
+    )]
+    pub token_account: Account<'info, TokenAccount>,
+
+    pub system_program: Program<'info, System>,
+
+    pub token_program: Program<'info, Token>,
+
+    pub associated_token_program: Program<'info, AssociatedToken>,
+}
+
 #[account]
 pub struct CounterAccount {
     pub count: u64
@@ -82,6 +111,11 @@ mod testing {
         transaction::Transaction,
     };
     use anchor_lang::{InstructionData, AccountDeserialize}; 
+
+    use litesvm_token::{
+        spl_token::{self, native_mint::DECIMALS},
+        CreateAssociatedTokenAccount, CreateMint, MintTo,
+    };
 
     #[test]
     fn initialize_counter() {
@@ -279,5 +313,61 @@ mod testing {
         ).unwrap();
         println!("After decrement: {}", counter_data.count);
         assert_eq!(counter_data.count, 0);
+    }
+
+    #[test]
+    fn initialize_token_account() {
+        let mut svm = LiteSVM::new();
+        let program_id = crate::ID;
+        let program_bytes = include_bytes!("../../../target/deploy/litesvm_exp.so");
+        svm.add_program(program_id, program_bytes);
+        println!("Program ID: {}", program_id);
+
+        let signer = Keypair::new();
+        svm.airdrop(&signer.pubkey(), 10_000_000_000).unwrap(); 
+
+        let mint = CreateMint::new(&mut svm, &signer)
+            .authority(&signer.pubkey())
+            .decimals(DECIMALS)
+            .send()
+            .unwrap();
+
+        let signer_ata = CreateAssociatedTokenAccount::new(&mut svm, &signer, &mint)
+            .owner(&signer.pubkey())
+            .send()
+            .unwrap();
+
+        MintTo::new(&mut svm, &signer, &mint, &signer_ata, 1_000_000_000) 
+            .send()
+            .unwrap();
+
+        let instruction_data = crate::instruction::InitTokenAccount {}.data();
+
+        let initialize_token_account_instruction = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(signer.pubkey(), true), 
+                AccountMeta::new(mint, false),
+                AccountMeta::new(signer_ata, false),  
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                AccountMeta::new_readonly(spl_token::id(), false),
+                AccountMeta::new_readonly(spl_associated_token_account::id(), false),
+            ],
+            data: instruction_data,
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[initialize_token_account_instruction],
+            Some(&signer.pubkey()),
+            &[&signer],
+            svm.latest_blockhash(),
+        );
+
+        svm.send_transaction(tx).unwrap();
+
+        println!("Token account initialized successfully!");
+
+        let token_account = svm.get_account(&signer_ata).unwrap();
+        println!("Token Account: {}", signer_ata);
     }
 }
